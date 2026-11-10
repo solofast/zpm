@@ -43,8 +43,8 @@ cargo install --path crates/zpm-cli        # 编译 release 并安装到 ~/.carg
 ```sh
 zpm repo create main                      # 创建仓库（默认 <repo_home>/main）
 zpm repo switch main                      # 切换激活仓库
-zpm framework load ~/.zpm/frameworks/basecoat-pm   # 从本地目录加载框架（旧基线手动迁移入口）
-zpm project create demo --framework basecoat-pm   # 从激活仓库的框架创建项目（必填 --framework）
+zpm framework load ~/.zpm/frameworks/basecoat   # 从本地目录加载框架
+zpm project create demo --framework basecoat   # 从激活仓库的框架创建项目（必填 --framework）
 cd demo
 zpm db init                               # 建目标库（sqlite 自动创建；pg 验证连接）
 zpm db seed seed.sql                      # 导入初始数据（可选）
@@ -97,8 +97,8 @@ zpm repo sync --from ~/shared/zpm-repo --name borrowed
 zpm repo sync --from https://github.com/someone/zpm-repo.git   # 名字默认取 URL 末段
 
 # 单框架流动：只取/只推 frameworks/<name> 子树
-zpm framework pull basecoat-pm --from ~/shared/zpm-repo          # 本地同名已存在时需 --force
-zpm framework push basecoat-pm --to git@github.com:me/repo.git   # 远端内容不同时需 --force
+zpm framework pull basecoat --from ~/shared/zpm-repo          # 本地同名已存在时需 --force
+zpm framework push basecoat --to git@github.com:me/repo.git   # 远端内容不同时需 --force
 ```
 
 引用识别规则：含 `://`、`git@` 前缀或 `.git` 后缀 → Git 后端（shell-out 系统 `git`，
