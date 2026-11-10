@@ -1,0 +1,10 @@
+[package]
+name = "zpm-meta"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true, features = ["bundled"] }
+tempfile.workspace = true
+walkdir.workspace = true

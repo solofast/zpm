@@ -1,0 +1,39 @@
+[workspace]
+members = ["crates/zpm-core", "crates/zpm-cli", "crates/zpm-server", "crates/zpm-meta"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+serde_yaml = "0.9"
+dirs = "5"
+walkdir = "2"
+thiserror = "1"
+sha2 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+axum = { version = "0.8" }
+tower-http = { version = "0.6", features = ["fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+postgres = "0.17"
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+croner = "2"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

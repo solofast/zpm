@@ -1,0 +1,24 @@
+[package]
+name = "zpm-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zpm-core = { path = "../zpm-core" }
+serde_json.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+postgres.workspace = true
+uuid.workspace = true
+hex.workspace = true
+percent-encoding.workspace = true
+croner.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true

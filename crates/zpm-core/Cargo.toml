@@ -1,0 +1,24 @@
+[package]
+name = "zpm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml.workspace = true
+toml.workspace = true
+dirs.workspace = true
+walkdir.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+postgres.workspace = true
+percent-encoding.workspace = true
+zpm-meta = { path = "../zpm-meta" }
+
+[dev-dependencies]
+tempfile.workspace = true
