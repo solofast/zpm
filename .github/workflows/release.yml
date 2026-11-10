@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装 musl 工具链（Linux 静态链接）
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: 编译（release）
+        run: cargo build --release -p zpm-cli --target ${{ matrix.target }} --locked
+        env:
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER: clang
+          CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER: clang
+
+      - name: 打包（unix）
+        if: matrix.archive == 'tar.gz'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../zpm-${{ matrix.target }}.tar.gz zpm
+          cd ../../..
+          shasum -a 256 zpm-${{ matrix.target }}.tar.gz > zpm-${{ matrix.target }}.tar.gz.sha256
+
+      - name: 打包（windows）
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/${{ matrix.target }}/release/zpm.exe -DestinationPath zpm-${{ matrix.target }}.zip
+          $h = (Get-FileHash zpm-${{ matrix.target }}.zip -Algorithm SHA256).Hash.ToLower()
+          "$h  zpm-${{ matrix.target }}.zip" | Out-File -Encoding ascii zpm-${{ matrix.target }}.zip.sha256
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: zpm-${{ matrix.target }}
+          path: |
+            zpm-${{ matrix.target }}.tar.gz
+            zpm-${{ matrix.target }}.zip
+            zpm-${{ matrix.target }}.tar.gz.sha256
+            zpm-${{ matrix.target }}.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: 发布 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: 创建 Release 并附上二进制
+        uses: softprops/action-gh-release@v2
+        with:
+          name: zpm ${{ github.ref_name }}
+          body: |
+            zpm 首个发布版本。
+
+            下载对应平台的压缩包，解压后将 `zpm`（Windows 下为 `zpm.exe`）放入 PATH 即可：
+
+            | 平台 | 文件 |
+            |---|---|
+            | Linux x86_64（静态链接） | `zpm-x86_64-unknown-linux-musl.tar.gz` |
+            | macOS Apple Silicon | `zpm-aarch64-apple-darwin.tar.gz` |
+            | macOS Intel | `zpm-x86_64-apple-darwin.tar.gz` |
+            | Windows x86_64 | `zpm-x86_64-pc-windows-msvc.zip` |
+
+            各压缩包附有 `.sha256` 校验文件。
+          files: dist/*
+          draft: false
+          prerelease: false
