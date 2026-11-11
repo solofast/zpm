@@ -3,7 +3,7 @@ members = ["crates/zpm-core", "crates/zpm-cli", "crates/zpm-server", "crates/zpm
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 license = "MIT"
 
