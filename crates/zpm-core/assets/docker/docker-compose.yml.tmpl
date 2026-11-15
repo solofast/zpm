@@ -1,0 +1,19 @@
+# zpm 原型服务（由 `zpm docker init` 生成）
+# 页面/主题/库文件挂载宿主机：改动文件，浏览器刷新即最新
+# 数据源按 zpm.config.yaml 使用；开发机 postgres 走 host.docker.internal
+services:
+  zpm:
+    build: .
+    image: {{image}}:{{tag}}
+{{platform_line}}    ports: ["{{port}}:{{port}}"]
+    working_dir: /app
+    command: ["serve"]
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./zpm.config.yaml:/app/zpm.config.yaml
+      - ./pages:/app/pages
+      - ./themes:/app/themes
+      - ./vendor:/app/vendor
+      - ./data:/app/data

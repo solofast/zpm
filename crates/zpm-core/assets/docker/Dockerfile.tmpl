@@ -1,0 +1,11 @@
+# zpm 原型服务镜像（由 `zpm docker init` 生成）
+# 薄镜像只装 zpm 本体；页面/主题/库文件/数据由 docker-compose.yml 挂载宿主机
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY zpm-{{target}}.tar.gz /tmp/zpm.tar.gz
+RUN tar -xzf /tmp/zpm.tar.gz -C /usr/local/bin && rm -f /tmp/zpm.tar.gz && chmod +x /usr/local/bin/zpm
+WORKDIR /app
+EXPOSE {{port}}
+ENTRYPOINT ["zpm"]
+CMD ["serve"]
