@@ -354,6 +354,83 @@ fn verify_sha256(root: &Path, dest: &Path, url: &str) -> Result<(), ZpmError> {
     Ok(())
 }
 
+/// 纯函数：docker build 参数（不含程序名）
+pub fn docker_build_args(image: &str, tag: &str, platform: Option<&str>) -> Vec<String> {
+    let mut v = vec!["build".to_string()];
+    if let Some(p) = platform {
+        v.push("--platform".into());
+        v.push(p.to_string());
+    }
+    v.push("-t".into());
+    v.push(format!("{image}:{tag}"));
+    v.push(".".into());
+    v
+}
+
+/// 纯函数：docker compose 子命令参数
+pub fn compose_args(action: &str) -> Vec<String> {
+    match action {
+        "up" => vec!["compose".into(), "up".into(), "-d".into()],
+        "down" => vec!["compose".into(), "down".into()],
+        other => vec!["compose".into(), other.into()],
+    }
+}
+
+/// 探测 `<prog> version` 可用性；未安装/不可用给中文错误
+pub fn ensure_available(prog: &str) -> Result<(), ZpmError> {
+    match Command::new(prog).arg("version").output() {
+        Err(_) => Err(ZpmError::NotFound(
+            "未检测到 docker：请先安装并启动 Docker Desktop（或 linux docker 服务）".into(),
+        )),
+        Ok(out) if !out.status.success() => Err(ZpmError::Format(format!(
+            "docker 不可用（daemon 未运行？）：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// shell-out 执行（沿 git 传输层约定：失败携带 stderr）
+fn run_prog(prog: &str, args: &[String], cwd: &Path) -> Result<(), ZpmError> {
+    let out = Command::new(prog).args(args).current_dir(cwd).output()?;
+    if !out.status.success() {
+        return Err(ZpmError::TransportError(format!(
+            "docker {} 失败：{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// docker build（在项目根执行）
+pub fn build_image(
+    root: &Path,
+    image: &str,
+    tag: &str,
+    platform: Option<&str>,
+) -> Result<(), ZpmError> {
+    ensure_available("docker")?;
+    run_prog("docker", &docker_build_args(image, tag, platform), root)
+}
+
+/// docker compose up -d（在项目根执行；先探测 compose 插件）
+pub fn compose_up(root: &Path) -> Result<(), ZpmError> {
+    ensure_available("docker")?;
+    let probe = Command::new("docker").args(["compose", "version"]).output()?;
+    if !probe.status.success() {
+        return Err(ZpmError::NotFound(
+            "docker compose 插件不可用：请升级 Docker Desktop 或安装 docker-compose-plugin".into(),
+        ));
+    }
+    run_prog("docker", &compose_args("up"), root)
+}
+
+/// docker compose down（在项目根执行）
+pub fn compose_down(root: &Path) -> Result<(), ZpmError> {
+    run_prog("docker", &compose_args("down"), root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +652,69 @@ sync: { tables: [] }
         let dir = tempfile::tempdir().unwrap();
         let err = stage_binary(dir.path(), &dir.path().join("nope"), "t", false).unwrap_err();
         assert!(err.to_string().contains("--binary"), "实际：{err}");
+    }
+
+    /// 在 dir 下写可执行脚本（unix）
+    #[cfg(unix)]
+    fn fake_prog(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn docker_build_args_shape() {
+        assert_eq!(
+            docker_build_args("img", "t1", Some("linux/arm64")),
+            vec![
+                "build".to_string(),
+                "--platform".to_string(),
+                "linux/arm64".to_string(),
+                "-t".to_string(),
+                "img:t1".to_string(),
+                ".".to_string()
+            ]
+        );
+        assert_eq!(
+            docker_build_args("img", "t1", None),
+            vec!["build".to_string(), "-t".to_string(), "img:t1".to_string(), ".".to_string()]
+        );
+    }
+
+    #[test]
+    fn compose_args_shape() {
+        assert_eq!(compose_args("up"), vec!["compose".to_string(), "up".to_string(), "-d".to_string()]);
+        assert_eq!(compose_args("down"), vec!["compose".to_string(), "down".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_available_reports_missing_and_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        // 假 docker：成功
+        let good = fake_prog(dir.path(), "docker-ok", "#!/bin/sh\nexit 0\n");
+        let prog = good.to_str().unwrap();
+        ensure_available(prog).unwrap();
+        // 假 docker：退出非零（daemon 未运行）
+        let bad = fake_prog(dir.path(), "docker-bad", "#!/bin/sh\necho cannot connect >&2\nexit 1\n");
+        let err = ensure_available(bad.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("不可用"), "实际：{err}");
+        assert!(err.to_string().contains("cannot connect"));
+        // 不存在的程序
+        let err = ensure_available(dir.path().join("no-such-docker").to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("未检测到"), "实际：{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_prog_carries_stderr_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = fake_prog(dir.path(), "docker", "#!/bin/sh\necho boom >&2\nexit 7\n");
+        let args = vec!["build".to_string()];
+        let err = run_prog(bad.to_str().unwrap(), &args, dir.path()).unwrap_err();
+        assert!(err.to_string().contains("boom"), "实际：{err}");
+        assert!(err.to_string().contains("build"), "错误应含子命令：{err}");
     }
 }
