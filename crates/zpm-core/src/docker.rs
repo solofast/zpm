@@ -7,7 +7,8 @@
 use crate::error::ZpmError;
 use crate::project_config::DockerCfg;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Release 下载默认仓库（用户确认：upstream）
 pub const RELEASE_REPO: &str = "solofast/zpm";
@@ -218,6 +219,141 @@ pub fn drift_warnings(root: &Path, cfg: &crate::project_config::ProjectConfig) -
     }
 }
 
+/// `--binary` 落位：把用户提供的二进制/tar.gz 整理为项目根 `zpm-<target>.tar.gz`。
+/// 裸二进制打包为根级单条目 `zpm` 的 tar.gz（与 release 产物布局一致）；
+/// tar.gz 直接按名落位；dest 已存在且 !force → 复用。
+pub fn stage_binary(
+    root: &Path,
+    src: &Path,
+    target: &str,
+    force: bool,
+) -> Result<PathBuf, ZpmError> {
+    let dest = root.join(format!("zpm-{target}.tar.gz"));
+    if dest.exists() && !force {
+        return Ok(dest);
+    }
+    // 先判存在性再 canonicalize：源缺失时 canonicalize 只给裸 io 错误，报错须带 --binary 语境
+    if !src.is_file() {
+        return Err(ZpmError::NotFound(format!(
+            "--binary 不存在或不是文件：{}",
+            src.display()
+        )));
+    }
+    let src = src.canonicalize()?;
+    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+    if name.ends_with(".tar.gz") {
+        std::fs::copy(&src, &dest)?;
+        return Ok(dest);
+    }
+    // 裸二进制 → 打包
+    let stage_dir = root.join(".zpm-docker-stage");
+    std::fs::create_dir_all(&stage_dir)?;
+    std::fs::copy(&src, stage_dir.join("zpm"))?;
+    let out = Command::new("tar")
+        .args(["czf"])
+        .arg(&dest)
+        .arg("-C")
+        .arg(&stage_dir)
+        .arg("zpm")
+        .output();
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    let out = out?;
+    if !out.status.success() {
+        return Err(ZpmError::TransportError(format!(
+            "打包 --binary 失败：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(dest)
+}
+
+/// 从 GitHub Release 下载二进制到项目根 `zpm-<target>.tar.gz`（curl shell-out）。
+/// 已存在且 !force → 复用。成功后尽力校验 `.sha256`（工具/网络不可得 → 警告跳过；
+/// 摘要不匹配 → 报错并删除产物）。
+pub fn download_release_binary(
+    root: &Path,
+    cfg: &DockerCfg,
+    target: &str,
+    force: bool,
+) -> Result<PathBuf, ZpmError> {
+    let dest = root.join(format!("zpm-{target}.tar.gz"));
+    if dest.exists() && !force {
+        return Ok(dest);
+    }
+    let url = release_url(cfg, target);
+    let out = Command::new("curl")
+        .args(["-fSL", "--retry", "2", "-o"])
+        .arg(&dest)
+        .arg(&url)
+        .output()
+        .map_err(|_| {
+            ZpmError::NotFound(
+                "未检测到 curl：下载 release 二进制需要 curl，或用 --binary 提供本地文件".into(),
+            )
+        })?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&dest);
+        return Err(ZpmError::TransportError(format!(
+            "下载 release 二进制失败：{url}\n{}（提示：国内网络可配置 zpm.config.yaml 的 docker.release_mirror，或改用 --binary）",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    if let Err(e) = verify_sha256(root, &dest, &url) {
+        let _ = std::fs::remove_file(&dest);
+        return Err(e);
+    }
+    Ok(dest)
+}
+
+/// 尽力校验 `<url>.sha256`：获取/计算任一步不可行 → stderr 警告并跳过；不匹配 → 报错。
+fn verify_sha256(root: &Path, dest: &Path, url: &str) -> Result<(), ZpmError> {
+    let sum_file = root.join(".zpm-docker-download.sha256");
+    let fetched = Command::new("curl")
+        .args(["-fSL", "--retry", "1", "-o"])
+        .arg(&sum_file)
+        .arg(format!("{url}.sha256"))
+        .output();
+    let expected = match fetched {
+        Ok(o) if o.status.success() => {
+            let first = std::fs::read_to_string(&sum_file)
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            let _ = std::fs::remove_file(&sum_file);
+            first
+        }
+        _ => {
+            eprintln!("提示：未能获取 .sha256（跳过校验）");
+            return Ok(());
+        }
+    };
+    if expected.is_empty() {
+        eprintln!("提示：.sha256 内容为空（跳过校验）");
+        return Ok(());
+    }
+    // 本地摘要：sha256sum（linux）优先，shasum -a 256（mac）兜底
+    let local = Command::new("sha256sum")
+        .arg(dest)
+        .output()
+        .or_else(|_| Command::new("shasum").args(["-a", "256"]).arg(dest).output())?;
+    let actual = String::from_utf8_lossy(&local.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if actual != expected {
+        return Err(ZpmError::TransportError(format!(
+            "release 二进制校验失败：期望 {expected}，实际 {actual}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +523,57 @@ sync: { tables: [] }
         std::fs::remove_file(dir.path().join("docker-compose.yml")).unwrap();
         let ws = drift_warnings(dir.path(), &cfg);
         assert!(ws[0].contains("zpm docker init"));
+    }
+
+    #[test]
+    fn stage_binary_tars_plain_binary_as_flat_zpm_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("zpm-debug-build");
+        std::fs::write(&bin, b"fake-elf").unwrap();
+        let dest = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl", false).unwrap();
+        assert_eq!(
+            dest.file_name().unwrap().to_str().unwrap(),
+            "zpm-x86_64-unknown-linux-musl.tar.gz"
+        );
+        // 归档内是根级单条目 zpm（与 release 产物布局一致）
+        let list = Command::new("tar").args(["-tzf"]).arg(&dest).output().unwrap();
+        assert!(list.status.success());
+        let names = String::from_utf8_lossy(&list.stdout);
+        assert!(names.lines().any(|l| l.trim() == "zpm"), "归档内容：{names}");
+        // 幂等：已存在且 !force → 复用（不重建，验证 mtime 不变过重，这里验证再次调用成功返回同路径）
+        let dest2 = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl", false).unwrap();
+        assert_eq!(dest, dest2);
+    }
+
+    #[test]
+    fn stage_binary_passes_through_tar_gz_and_force_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        // 预制一个 tar.gz
+        let src_bin = dir.path().join("zpm");
+        std::fs::write(&src_bin, b"payload").unwrap();
+        let src_tgz = dir.path().join("custom.tar.gz");
+        let o = Command::new("tar")
+            .args(["czf"]).arg(&src_tgz).arg("-C").arg(dir.path()).arg("zpm")
+            .output().unwrap();
+        assert!(o.status.success());
+        let dest = stage_binary(dir.path(), &src_tgz, "aarch64-unknown-linux-musl", false).unwrap();
+        assert!(dest.exists());
+        // force：给一个不同的新 tar.gz，覆盖目标
+        let other = dir.path().join("other.tar.gz");
+        std::fs::write(dir.path().join("marker"), b"marker").unwrap();
+        let o = Command::new("tar")
+            .args(["czf"]).arg(&other).arg("-C").arg(dir.path()).arg("marker")
+            .output().unwrap();
+        assert!(o.status.success());
+        stage_binary(dir.path(), &other, "aarch64-unknown-linux-musl", true).unwrap();
+        let list = Command::new("tar").args(["-tzf"]).arg(&dest).output().unwrap();
+        assert!(String::from_utf8_lossy(&list.stdout).contains("marker"), "force 未覆盖");
+    }
+
+    #[test]
+    fn stage_binary_missing_source_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = stage_binary(dir.path(), &dir.path().join("nope"), "t", false).unwrap_err();
+        assert!(err.to_string().contains("--binary"), "实际：{err}");
     }
 }
