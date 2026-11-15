@@ -59,7 +59,7 @@ pub fn effective_rust_target(cfg: &DockerCfg, platform: Platform) -> String {
 }
 
 /// 镜像名安全化：取 name 末段（路径名 → 目录名），小写化，非 [a-z0-9_.-] → '-'，
-/// 去掉开头的非字母数字段；空则回落 zpm-app。
+/// 去掉开头/结尾的非字母数字段（docker 镜像名组件须以字母数字结尾）；空则回落 zpm-app。
 pub fn sanitize_image_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let mapped: String = base
@@ -72,8 +72,9 @@ pub fn sanitize_image_name(name: &str) -> String {
             }
         })
         .collect();
-    let trimmed =
-        mapped.trim_start_matches(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit()));
+    let trimmed = mapped
+        .trim_start_matches(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit()))
+        .trim_end_matches(['-', '.', '_']);
     if trimmed.is_empty() { "zpm-app".to_string() } else { trimmed.to_string() }
 }
 
@@ -129,7 +130,8 @@ mod tests {
         // 路径名取末段（参考项目 name 是绝对路径）
         assert_eq!(sanitize_image_name("/Users/nutsjian/.rain/zpm-examples/zpm-new-crm"), "zpm-new-crm");
         assert_eq!(sanitize_image_name("demo"), "demo");
-        assert_eq!(sanitize_image_name("My CRM!"), "my-crm-");
+        assert_eq!(sanitize_image_name("My CRM!"), "my-crm");
+        assert_eq!(sanitize_image_name("app."), "app");
         // 开头必须字母数字
         assert_eq!(sanitize_image_name("-app"), "app");
         assert_eq!(sanitize_image_name("!!!"), "zpm-app");
