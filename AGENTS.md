@@ -31,7 +31,7 @@ Rust workspace（edition 2021），四个 crate。依赖方向：`zpm-cli → zp
 
 ```sh
 cargo build && cargo test     # 全套件（含 static/api/session 集成测试；server 测试不动全局状态）
-bash scripts/e2e-smoke.sh     # 端到端冒烟：repo→framework→project→db→serve→HTTP 断言（需先 cargo build；全程临时目录隔离）
+bash scripts/e2e-smoke.sh     # 端到端冒烟：repo→framework→project→db→serve→HTTP 断言→docker 门控段（mac 只验构建/linux 全链路，无 docker 自动跳过；需先 cargo build；全程临时目录隔离）
 ZPM_TEST_PG="postgres://..." cargo test -p zpm-core store::postgres   # pg 门控测试（需真库）
 ```
 
