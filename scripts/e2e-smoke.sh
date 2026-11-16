@@ -53,7 +53,7 @@ echo '规则索引' > "$FW/knowledge/rules/README.md"
 
 echo "[e2e] 2/5 framework load + project create"
 "$ZPM" framework load "$FW"
-"$ZPM" project create "$T/app" --framework smoke-fw --name demo
+"$ZPM" project create "$T/app" --framework smoke-fw --name demo --port 4656
 
 cd "$T/app"
 echo "[e2e] 3/5 db init + seed"
@@ -89,5 +89,29 @@ curl -sf -o /dev/null "http://127.0.0.1:$PORT/theme.css" || { echo "FAIL: theme.
 curl -sf -o /dev/null "http://127.0.0.1:$PORT/index.html" || { echo "FAIL: index.html"; exit 1; }
 # workbench.html（fixture pages/ 自带）
 curl -sf -o /dev/null "http://127.0.0.1:$PORT/workbench.html" || { echo "FAIL: workbench.html"; exit 1; }
+
+echo "[e2e] 6/6 docker 门控段"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  "$ZPM" docker init
+  "$ZPM" docker build --binary "$ZPM"
+  if [ "$(uname -s)" = "Linux" ]; then
+    # linux：全链路（本地二进制为 glibc 动态链接，debian-slim 基础镜像可运行）
+    "$ZPM" docker up
+    ok=""
+    for _ in $(seq 1 30); do
+      curl -sf --max-time 1 "http://127.0.0.1:4656/api/_meta" > /dev/null 2>&1 && { ok=1; break; }
+      sleep 0.5
+    done
+    [ -n "$ok" ] || { echo "FAIL: docker 服务未就绪"; exit 1; }
+    curl -sf -o /dev/null "http://127.0.0.1:4656/index.html" || { echo "FAIL: docker index.html"; exit 1; }
+    "$ZPM" docker down
+    docker rmi -f demo:latest >/dev/null 2>&1 || true
+  else
+    # mac：本地二进制是 Mach-O，容器内无法运行——只验证镜像构建成功
+    docker image inspect demo:latest >/dev/null || { echo "FAIL: docker 镜像未构建"; exit 1; }
+  fi
+else
+  echo "[e2e] docker 不可用，跳过 docker 段"
+fi
 
 echo "E2E SMOKE PASS ✓"
