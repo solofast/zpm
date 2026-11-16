@@ -15,7 +15,7 @@ trap cleanup EXIT
 # 全程隔离：全局配置（含 repo_home 之外的一切状态）指向临时目录
 export ZPM_CONFIG_HOME="$T/cfg"
 
-echo "[e2e] 1/5 造 fixture 框架 + repo create smoke"
+echo "[e2e] 1/6 造 fixture 框架 + repo create smoke"
 FW="$T/fw-smoke"
 mkdir -p "$FW/knowledge/rules" "$FW/knowledge/lessons" "$FW/knowledge/assets" "$FW/pages"
 cat > "$FW/framework.yaml" <<'YAML'
@@ -51,12 +51,12 @@ echo '规则索引' > "$FW/knowledge/rules/README.md"
 "$ZPM" repo create smoke
 "$ZPM" repo switch smoke
 
-echo "[e2e] 2/5 framework load + project create"
+echo "[e2e] 2/6 framework load + project create"
 "$ZPM" framework load "$FW"
 "$ZPM" project create "$T/app" --framework smoke-fw --name demo --port 4656
 
 cd "$T/app"
-echo "[e2e] 3/5 db init + seed"
+echo "[e2e] 3/6 db init + seed"
 "$ZPM" db init
 cat > seed.sql <<'SQL'
 CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
@@ -64,7 +64,7 @@ INSERT INTO users VALUES (1, 'a'), (2, 'b');
 SQL
 "$ZPM" db seed seed.sql
 
-echo "[e2e] 4/5 serve on :$PORT"
+echo "[e2e] 4/6 serve on :$PORT"
 "$ZPM" serve --port "$PORT" &
 SRV=$!
 ok=""
@@ -74,7 +74,7 @@ for _ in $(seq 1 20); do
 done
 [ -n "$ok" ] || { echo "FAIL: 服务未就绪"; exit 1; }
 
-echo "[e2e] 5/5 HTTP 断言"
+echo "[e2e] 5/6 HTTP 断言"
 meta=$(curl -sf "http://127.0.0.1:$PORT/api/_meta")
 echo "$meta" | grep -q '"users"'                    || { echo "FAIL: _meta 缺 users 表"; exit 1; }
 # fixture 模板 write.enabled=false → 契约值 disabled（写关闭时 mode 不外显）
