@@ -50,6 +50,9 @@ zpm db init                               # 建目标库（sqlite 自动创建�
 zpm db seed seed.sql                      # 导入初始数据（可选）
 zpm db sync                               # 数据同步：数据源 → 目标库
 zpm serve                                 # 启动原型服务器（默认 0.0.0.0:4310）
+zpm docker init                              # 生成 Dockerfile / docker-compose.yml / .dockerignore
+zpm docker build [--binary <path>]           # 构建镜像（缺省从 GitHub Release 下载二进制）
+zpm docker up | zpm docker down              # compose 启动 / 停止容器
 # 浏览器打开 http://localhost:4310/index.html，opencode 打开目录开始生成页面
 # 经验反哺：zpm framework knowledge pull | push（项目知识 ↔ 仓库框架基线）
 ```
@@ -70,6 +73,7 @@ zpm serve                                 # 启动原型服务器（默认 0.0.0
 | `zpm db sync [--config <path>] [--tables a,b] [--from <sqlite>]` | 数据同步：zpm.config.yaml 的数据源 → 目标库，shadow-rename 全量替换；`--config` 指定任意位置的配置文件 |
 | `zpm db init` / `seed <file>` / `export` / `import <file>` | 目标库初始化 / SQL 导入（分号切分逐条）/ 快照导出 / 快照导入 |
 | `zpm serve [--port <p>]` | 原型服务器：静态三层 + `/api` 通用 CRUD + simulated 演示写 + 定时同步（`sync.schedule`）+ Ctrl-C 优雅关闭 |
+| `zpm docker init\|build\|up\|down` | 容器化交付：生成三件套（薄镜像 + 项目文件挂载）、构建镜像（`--platform` 选 linux/amd64\|arm64，缺省从 Release 下载二进制）、compose 启停 |
 | `zpm config get/set/list` | 全局配置（`repo_home` / `active_repo` / `assets_dir`） |
 | `zpm status` / `zpm version` | 项目状态概览 / 版本号 |
 
@@ -168,4 +172,4 @@ ZPM_TEST_PG="postgres://..." cargo test -p zpm-core store::postgres   # pg 门�
 
 ## 路线图
 
-git 命令族（commit/PR/tag）、`zpm docker`（镜像/部署/离线包）、旧 TS 项目迁移助手、`project list`、复合主键同步。
+git 命令族（commit/PR/tag）、旧 TS 项目迁移助手、`project list`、复合主键同步。

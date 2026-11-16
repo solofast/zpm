@@ -51,6 +51,8 @@ zpm project   create [path] --framework <name> [init 选项] | delete <name-or-p
 zpm db        sync [--config <path>] [--tables <a,b>] [--from <sqlite>]
               | init | seed <file> | export [file] | import <file>
 zpm serve     [--port <p>]
+zpm docker    init [--force] [--platform <p>] | build [--platform <p>] [--tag <t>] [--binary <path>] [--force]
+              | up | down                        （生成 Dockerfile/compose、构建镜像、启停容器）
 zpm config    get|set|list        （键：repo_home / active_repo / assets_dir）
 zpm status | zpm version
 ```
