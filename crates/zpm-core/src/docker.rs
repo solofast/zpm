@@ -6,7 +6,7 @@
 
 use crate::error::ZpmError;
 use crate::project_config::DockerCfg;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -81,9 +81,13 @@ pub fn sanitize_image_name(name: &str) -> String {
     if trimmed.is_empty() { "zpm-app".to_string() } else { trimmed.to_string() }
 }
 
-/// 生效镜像名：cfg.image > name 末段安全化（此处只做纯计算，ProjectConfig 版包装见任务 3）
+/// 生效镜像名：cfg.image > name 末段，两者都经安全化
+/// （配置节约定：image 安全化后非空；显式值同样可能是 "My CRM!" 这类非法名）
 pub fn effective_image_of(name: &str, cfg: &DockerCfg) -> String {
-    cfg.image.clone().unwrap_or_else(|| sanitize_image_name(name))
+    cfg.image
+        .clone()
+        .map(|img| sanitize_image_name(&img))
+        .unwrap_or_else(|| sanitize_image_name(name))
 }
 
 /// 生效 tag：cfg.tag > latest
@@ -205,14 +209,52 @@ pub fn compose_port(compose_txt: &str) -> Option<u16> {
     host.trim().parse().ok()
 }
 
-/// 漂移检查：按当前配置重渲染 compose 与磁盘比对；返回警告列表（空 = 一致）
+/// 从 compose 文本解析 platform 行（`platform: linux/arm64` → 值）；无该行 → None
+pub fn compose_platform(compose_txt: &str) -> Option<String> {
+    let line = compose_txt.lines().find(|l| l.trim_start().starts_with("platform:"))?;
+    let (_, val) = line.split_once(':')?;
+    let v = val.trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// build 前预检：磁盘 Dockerfile 必须存在，且 COPY 目标与本次构建 target 一致
+/// （否则落位的归档名与 COPY 对不上，docker 只会裸报 COPY 失败）。
+pub fn check_dockerfile_target(root: &Path, target: &str) -> Result<(), ZpmError> {
+    let txt = std::fs::read_to_string(root.join("Dockerfile")).map_err(|_| {
+        ZpmError::NotFound("未找到 Dockerfile（先运行 zpm docker init）".to_string())
+    })?;
+    let copy_line = format!("COPY zpm-{target}.tar.gz");
+    if txt.lines().any(|l| l.contains(&copy_line)) {
+        return Ok(());
+    }
+    let platform = match target {
+        "aarch64-unknown-linux-musl" => "linux/arm64",
+        "x86_64-unknown-linux-musl" => "linux/amd64",
+        _ => "<platform>",
+    };
+    Err(ZpmError::Format(format!(
+        "Dockerfile 的 COPY 目标与本次构建 target（{target}）不一致；请运行 zpm docker init --platform {platform} --force 重新生成 Dockerfile"
+    )))
+}
+
+/// 漂移检查：按当前配置重渲染 compose，提取 `ports:`/`image:`/`platform:`
+/// 三类关键行与磁盘比对（规格决定 #10：只看关键行，手改注释等不告警）；
+/// 任一关键行不在磁盘文本中 → 单条警告。
 pub fn drift_warnings(root: &Path, cfg: &crate::project_config::ProjectConfig) -> Vec<String> {
     let path = root.join("docker-compose.yml");
     let Ok(disk) = std::fs::read_to_string(&path) else {
         return vec!["未找到 docker-compose.yml（先运行 zpm docker init）".to_string()];
     };
     let rendered = render_compose(&render_ctx(cfg, None));
-    if rendered != disk {
+    let disk_lines: HashSet<&str> = disk.lines().map(str::trim).collect();
+    let drifted = rendered
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            l.starts_with("ports:") || l.starts_with("image:") || l.starts_with("platform:")
+        })
+        .any(|l| !disk_lines.contains(l));
+    if drifted {
         vec!["docker-compose.yml 与当前 zpm.config.yaml 不一致（端口/镜像名/platform 可能改过）；重新生成：zpm docker init --force".to_string()]
     } else {
         vec![]
@@ -221,17 +263,10 @@ pub fn drift_warnings(root: &Path, cfg: &crate::project_config::ProjectConfig) -
 
 /// `--binary` 落位：把用户提供的二进制/tar.gz 整理为项目根 `zpm-<target>.tar.gz`。
 /// 裸二进制打包为根级单条目 `zpm` 的 tar.gz（与 release 产物布局一致）；
-/// tar.gz 直接按名落位；dest 已存在且 !force → 复用。
-pub fn stage_binary(
-    root: &Path,
-    src: &Path,
-    target: &str,
-    force: bool,
-) -> Result<PathBuf, ZpmError> {
+/// tar.gz 直接按名落位；dest 已存在也无条件重新落位
+/// （--binary 显式提供时不得静默复用旧归档，否则镜像里可能是旧二进制）。
+pub fn stage_binary(root: &Path, src: &Path, target: &str) -> Result<PathBuf, ZpmError> {
     let dest = root.join(format!("zpm-{target}.tar.gz"));
-    if dest.exists() && !force {
-        return Ok(dest);
-    }
     // 先判存在性再 canonicalize：源缺失时 canonicalize 只给裸 io 错误，报错须带 --binary 语境
     if !src.is_file() {
         return Err(ZpmError::NotFound(format!(
@@ -278,6 +313,7 @@ pub fn download_release_binary(
 ) -> Result<PathBuf, ZpmError> {
     let dest = root.join(format!("zpm-{target}.tar.gz"));
     if dest.exists() && !force {
+        println!("复用已有 zpm-{target}.tar.gz（--force 重新下载）");
         return Ok(dest);
     }
     let url = release_url(cfg, target);
@@ -367,12 +403,11 @@ pub fn docker_build_args(image: &str, tag: &str, platform: Option<&str>) -> Vec<
     v
 }
 
-/// 纯函数：docker compose 子命令参数
+/// 纯函数：docker compose 子命令参数（仅 up/down 两用，透传分支已删）
 pub fn compose_args(action: &str) -> Vec<String> {
     match action {
         "up" => vec!["compose".into(), "up".into(), "-d".into()],
-        "down" => vec!["compose".into(), "down".into()],
-        other => vec!["compose".into(), other.into()],
+        _ => vec!["compose".into(), "down".into()],
     }
 }
 
@@ -426,8 +461,9 @@ pub fn compose_up(root: &Path) -> Result<(), ZpmError> {
     run_prog("docker", &compose_args("up"), root)
 }
 
-/// docker compose down（在项目根执行）
+/// docker compose down（在项目根执行；与 up/build 一致先探测可用性）
 pub fn compose_down(root: &Path) -> Result<(), ZpmError> {
+    ensure_available("docker")?;
     run_prog("docker", &compose_args("down"), root)
 }
 
@@ -436,7 +472,6 @@ mod tests {
     use super::*;
     use crate::project_config::DockerCfg;
     use crate::project_config::ProjectConfig;
-    use std::collections::BTreeMap;
 
     /// 最小合法项目配置（写临时文件加载；server.port = 4599）
     fn min_cfg() -> ProjectConfig {
@@ -498,6 +533,9 @@ sync: { tables: [] }
         assert_eq!(effective_tag(&cfg), "v9");
         cfg.tag = None;
         assert_eq!(effective_tag(&cfg), "latest");
+        // 显式值也过安全化（配置节约定：image 安全化后非空）
+        cfg.image = Some("My CRM!".into());
+        assert_eq!(effective_image_of("demo", &cfg), "my-crm");
     }
 
     #[test]
@@ -585,6 +623,39 @@ sync: { tables: [] }
     }
 
     #[test]
+    fn compose_platform_parses_line_or_none() {
+        let txt = "services:\n  zpm:\n    platform: linux/arm64\n    ports: [\"1:1\"]\n";
+        assert_eq!(compose_platform(txt), Some("linux/arm64".to_string()));
+        assert_eq!(compose_platform("no platform here"), None);
+    }
+
+    #[test]
+    fn check_dockerfile_target_matches_and_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = min_cfg();
+        generate_files(dir.path(), &cfg, None, false).unwrap();
+        let target = Platform::host_native().rust_target();
+        // 一致 → Ok
+        check_dockerfile_target(dir.path(), target).unwrap();
+        // 不一致 → Err 含「不一致」与指引
+        let other = if target == "aarch64-unknown-linux-musl" {
+            "x86_64-unknown-linux-musl"
+        } else {
+            "aarch64-unknown-linux-musl"
+        };
+        let err = check_dockerfile_target(dir.path(), other).unwrap_err();
+        assert!(err.to_string().contains("不一致"), "实际：{err}");
+        assert!(err.to_string().contains("zpm docker init --platform"), "实际：{err}");
+    }
+
+    #[test]
+    fn check_dockerfile_target_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = check_dockerfile_target(dir.path(), "x86_64-unknown-linux-musl").unwrap_err();
+        assert!(err.to_string().contains("未找到 Dockerfile"), "实际：{err}");
+    }
+
+    #[test]
     fn drift_warnings_detect_config_change() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = min_cfg();
@@ -607,7 +678,7 @@ sync: { tables: [] }
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("zpm-debug-build");
         std::fs::write(&bin, b"fake-elf").unwrap();
-        let dest = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl", false).unwrap();
+        let dest = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(
             dest.file_name().unwrap().to_str().unwrap(),
             "zpm-x86_64-unknown-linux-musl.tar.gz"
@@ -617,13 +688,13 @@ sync: { tables: [] }
         assert!(list.status.success());
         let names = String::from_utf8_lossy(&list.stdout);
         assert!(names.lines().any(|l| l.trim() == "zpm"), "归档内容：{names}");
-        // 幂等：已存在且 !force → 复用（不重建，验证 mtime 不变过重，这里验证再次调用成功返回同路径）
-        let dest2 = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl", false).unwrap();
+        // 重复落位返回同路径（裁定：--binary 显式提供时无条件重新落位，不再静默复用旧归档）
+        let dest2 = stage_binary(dir.path(), &bin, "x86_64-unknown-linux-musl").unwrap();
         assert_eq!(dest, dest2);
     }
 
     #[test]
-    fn stage_binary_passes_through_tar_gz_and_force_replaces() {
+    fn stage_binary_passes_through_tar_gz_and_overwrites_unconditionally() {
         let dir = tempfile::tempdir().unwrap();
         // 预制一个 tar.gz
         let src_bin = dir.path().join("zpm");
@@ -633,24 +704,24 @@ sync: { tables: [] }
             .args(["czf"]).arg(&src_tgz).arg("-C").arg(dir.path()).arg("zpm")
             .output().unwrap();
         assert!(o.status.success());
-        let dest = stage_binary(dir.path(), &src_tgz, "aarch64-unknown-linux-musl", false).unwrap();
+        let dest = stage_binary(dir.path(), &src_tgz, "aarch64-unknown-linux-musl").unwrap();
         assert!(dest.exists());
-        // force：给一个不同的新 tar.gz，覆盖目标
+        // 直通覆盖语义（裁定：--binary 显式提供时无条件重新落位，无需 force）
         let other = dir.path().join("other.tar.gz");
         std::fs::write(dir.path().join("marker"), b"marker").unwrap();
         let o = Command::new("tar")
             .args(["czf"]).arg(&other).arg("-C").arg(dir.path()).arg("marker")
             .output().unwrap();
         assert!(o.status.success());
-        stage_binary(dir.path(), &other, "aarch64-unknown-linux-musl", true).unwrap();
+        stage_binary(dir.path(), &other, "aarch64-unknown-linux-musl").unwrap();
         let list = Command::new("tar").args(["-tzf"]).arg(&dest).output().unwrap();
-        assert!(String::from_utf8_lossy(&list.stdout).contains("marker"), "force 未覆盖");
+        assert!(String::from_utf8_lossy(&list.stdout).contains("marker"), "未覆盖");
     }
 
     #[test]
     fn stage_binary_missing_source_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let err = stage_binary(dir.path(), &dir.path().join("nope"), "t", false).unwrap_err();
+        let err = stage_binary(dir.path(), &dir.path().join("nope"), "t").unwrap_err();
         assert!(err.to_string().contains("--binary"), "实际：{err}");
     }
 
