@@ -111,15 +111,22 @@ fn build(
         platform.unwrap_or_else(docker::Platform::host_native),
     );
     match binary {
-        Some(p) => docker::stage_binary(root, p, &target, force)?,
+        Some(p) => docker::stage_binary(root, p, &target)?,
         None => docker::download_release_binary(root, &cfg.docker, &target, force)?,
     };
+    // build 前预检：Dockerfile 的 COPY 目标须与本次 target 一致，否则 docker 只会裸报 COPY 失败
+    docker::check_dockerfile_target(root, &target)?;
     docker::build_image(root, &image, &tag, platform.map(|p| p.docker_name()))?;
-    // 平台漂移警告（规格决定 #9）：不自动回写生成物
-    if let (Some(p), Some(cfgp)) = (platform_cli, cfg.docker.platform.as_deref()) {
-        if p != cfgp {
-            println!("警告：--platform {p} 与 docker.platform 配置（{cfgp}）不一致。");
-            println!("请运行 zpm docker init --platform {p} --force 重新生成 compose。");
+    // 平台漂移警告（规格决定 #9）：与磁盘上 docker-compose.yml 的 platform 行比对，不自动回写生成物
+    if let Some(p) = platform_cli {
+        let disk_platform = std::fs::read_to_string(root.join("docker-compose.yml"))
+            .ok()
+            .and_then(|t| docker::compose_platform(&t));
+        if let Some(disk_p) = disk_platform {
+            if p != disk_p.as_str() {
+                println!("警告：--platform {p} 与 docker-compose.yml 的 platform（{disk_p}）不一致。");
+                println!("请运行 zpm docker init --platform {p} --force 重新生成 compose。");
+            }
         }
     }
     println!("镜像已构建：{image}:{tag}");

@@ -96,6 +96,8 @@ fn build_stages_binary_and_invokes_fake_docker() {
     let proj = TempDir::new().unwrap();
     fixture(proj.path());
     let (bin, log) = fake_docker();
+    // build 前预检要求 Dockerfile 已生成（I-3：先 init 再 build）
+    zpm().current_dir(proj.path()).args(["docker", "init"]).assert().success();
     // 假二进制
     let fake_bin = proj.path().join("fake-zpm-bin");
     fs::write(&fake_bin, b"fake-elf").unwrap();
@@ -166,4 +168,32 @@ fn build_without_docker_errors_chinese() {
         .failure();
     let err = String::from_utf8_lossy(&out.get_output().stderr);
     assert!(err.contains("未检测到 docker"), "实际：{err}");
+}
+
+#[test]
+fn build_warns_when_cli_platform_differs_from_disk_compose() {
+    let proj = TempDir::new().unwrap();
+    fixture(proj.path());
+    let (bin, _log) = fake_docker();
+    // init：配置 platform=linux/arm64 → 磁盘 compose 的 platform 行是 linux/arm64
+    zpm().current_dir(proj.path()).args(["docker", "init"]).assert().success();
+    // 手改 Dockerfile 的 COPY 目标为 amd64，模拟「Dockerfile 已按 amd64 重建而 compose 未重建」，
+    // 使 I-3 预检放行、单独暴露 I-2 的 compose 漂移警告路径
+    let df = proj.path().join("Dockerfile");
+    let txt = fs::read_to_string(&df)
+        .unwrap()
+        .replace("aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl");
+    fs::write(&df, txt).unwrap();
+    let fake_bin = proj.path().join("fake-zpm-bin");
+    fs::write(&fake_bin, b"fake-elf").unwrap();
+    let out = cmd_with_fake(&bin)
+        .current_dir(proj.path())
+        .args(["docker", "build", "--platform", "linux/amd64", "--binary"])
+        .arg(&fake_bin)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("不一致"), "实际：{stdout}");
+    assert!(stdout.contains("docker-compose.yml 的 platform（linux/arm64）"), "实际：{stdout}");
+    assert!(stdout.contains("zpm docker init --platform linux/amd64 --force"), "实际：{stdout}");
 }
