@@ -1,0 +1,104 @@
+name: AI Review (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: '要审查的 PR 编号'
+        required: true
+        type: string
+      auto_approve:
+        description: '报告结论为「可合并」时自动 Approve'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取 PR 元数据与 diff（以 tinkera-review 身份）
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+        run: |
+          gh pr view "${{ inputs.pr_number }}" --repo solofast/zpm --json title,author,body > /tmp/pr-meta.json
+          gh pr diff "${{ inputs.pr_number }}" --repo solofast/zpm > /tmp/pr.diff
+          echo "diff 行数：$(wc -l < /tmp/pr.diff)"
+
+      - name: 运行 AI 审查
+        env:
+          AI_API_BASE: ${{ vars.AI_API_BASE }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+
+          base = os.environ["AI_API_BASE"].rstrip("/")
+          key = os.environ["AI_API_KEY"]
+          model = os.environ["AI_MODEL"]
+
+          with open("/tmp/pr-meta.json") as f:
+              meta = json.load(f)
+          with open("/tmp/pr.diff") as f:
+              diff = f.read()
+          if len(diff) > 600_000:
+              diff = diff[:600_000] + "\n...（diff 过长，已截断）"
+
+          system = """你是一名资深 Rust 代码审查员，审查 zpm 仓库的 PR。审查维度：
+          1. 命令面与规格对齐（zpm docker init|build|up|down；平台参数 linux/amd64|arm64；
+             配置优先级 CLI > docker: 节 > 宿主原生）
+          2. 分层：CLI 薄层不得含业务逻辑；core 不依赖 clap
+          3. shell-out 必须argv 传参（无 shell 拼接注入面）；错误文案中文、失败携带 stderr
+          4. 测试断言真实行为（无 mock）；提交不越界（不碰 docs/.superpowers 等忽略目录）
+          5. 向后兼容：旧 zpm.config.yaml（无 docker 节）必须可解析
+          输出格式（中文）：
+          ### 结论（可合并 | 需修复 | 阻塞）
+          ### 发现（Critical/Important/Minor，各附 file:line 与理由）
+          ### 一句话理由
+          不要为凑结论放松标准；没有问题就明说没有问题。"""
+
+          user = f"PR 标题：{meta.get('title')}\n\nPR 描述：\n{meta.get('body','')[:4000]}\n\n完整 diff：\n```diff\n{diff}\n```"
+
+          body = json.dumps({
+              "model": model,
+              "messages": [
+                  {"role": "system", "content": system},
+                  {"role": "user", "content": user},
+              ],
+              "temperature": 0.2,
+          }).encode()
+
+          req = urllib.request.Request(
+              f"{base}/chat/completions", data=body,
+              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(req, timeout=300) as r:
+              out = json.load(r)
+          report = out["choices"][0]["message"]["content"]
+          with open("/tmp/pr1-review.md", "w") as f:
+              f.write(f"## AI Review 报告（workflow 手动触发）\n\n{report}\n")
+          print("报告已生成")
+          PY
+
+      - name: 报告发到 PR（Comment 留痕，tinkera-review 身份）
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+        run: |
+          gh pr review "${{ inputs.pr_number }}" --repo solofast/zpm \
+            --comment --body-file /tmp/pr1-review.md
+
+      - name: 可合并时自动 Approve（可选开关）
+        if: ${{ inputs.auto_approve }}
+        env:
+          GH_TOKEN: ${{ secrets.REVIEW_TOKEN }}
+        run: |
+          if grep -q "可合并" /tmp/pr1-review.md; then
+            gh pr review "${{ inputs.pr_number }}" --repo solofast/zpm \
+              --approve --body "AI review 通过：无阻塞发现。"
+          else
+            echo "报告未给出「可合并」结论，跳过 approve"
+          fi
