@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod dbsync;
+pub mod docker;
 pub mod error;
 pub mod framework;
 pub mod knowledge;

@@ -5,6 +5,7 @@ use zpm_core::ZpmError;
 
 mod cmd_config;
 mod cmd_db;
+mod cmd_docker;
 mod cmd_framework;
 mod cmd_project;
 mod cmd_repo;
@@ -29,6 +30,8 @@ enum Commands {
     Project(cmd_project::ProjectArgs),
     /// 目标库初始化/seed/快照导入导出/数据同步
     Db(cmd_db::DbArgs),
+    /// 容器化交付（生成 Dockerfile/compose、构建镜像、启停容器）
+    Docker(cmd_docker::DockerArgs),
     /// 原型服务器（静态托管 + 通用 CRUD API）
     Serve(cmd_serve::ServeArgs),
     /// 查看/设置全局配置
@@ -50,6 +53,7 @@ fn main() -> ExitCode {
         Some(Commands::Framework(args)) => report(cmd_framework::run(args)),
         Some(Commands::Project(args)) => report(cmd_project::run(args)),
         Some(Commands::Db(args)) => report(cmd_db::run(args)),
+        Some(Commands::Docker(args)) => report(cmd_docker::run(args)),
         Some(Commands::Serve(args)) => {
             // serve 是长驻服务：独立 tokio runtime 驱动，Ctrl-C 优雅关闭
             let runtime = tokio::runtime::Builder::new_multi_thread()
