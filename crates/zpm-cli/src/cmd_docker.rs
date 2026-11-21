@@ -34,7 +34,7 @@ pub enum DockerCommands {
         /// 使用本地二进制/tar.gz（跳过 release 下载）
         #[arg(long)]
         binary: Option<PathBuf>,
-        /// 重新下载/重新落位二进制
+        /// 强制重新下载 release 二进制（--binary 本就无条件重新落位，与此参数无关）
         #[arg(long)]
         force: bool,
     },
@@ -61,27 +61,13 @@ pub fn run(args: DockerArgs) -> Result<(), ZpmError> {
     }
 }
 
-/// 平台解析：CLI 显式 > 配置 > None（宿主原生）
-fn resolve_platform(
-    cli: Option<&str>,
-    cfg: &project_config::DockerCfg,
-) -> Result<Option<docker::Platform>, ZpmError> {
-    match cli {
-        Some(s) => Ok(Some(docker::Platform::parse(s)?)),
-        None => match &cfg.platform {
-            Some(s) => Ok(Some(docker::Platform::parse(s)?)),
-            None => Ok(None),
-        },
-    }
-}
-
 fn init(
     root: &Path,
     cfg: &ProjectConfig,
     force: bool,
     platform_cli: Option<&str>,
 ) -> Result<(), ZpmError> {
-    let platform = resolve_platform(platform_cli, &cfg.docker)?;
+    let platform = docker::resolve_platform(platform_cli, &cfg.docker)?;
     docker::generate_files(root, cfg, platform, force).map_err(|e| {
         if matches!(e, ZpmError::AlreadyExists(_)) {
             eprintln!("提示：加 --force 覆盖已有文件。");
@@ -102,7 +88,7 @@ fn build(
     force: bool,
 ) -> Result<(), ZpmError> {
     docker::ensure_available("docker")?;
-    let platform = resolve_platform(platform_cli, &cfg.docker)?;
+    let platform = docker::resolve_platform(platform_cli, &cfg.docker)?;
     let image = docker::effective_image(cfg);
     let tag =
         tag_cli.map(str::to_string).unwrap_or_else(|| docker::effective_tag(&cfg.docker));
@@ -118,15 +104,9 @@ fn build(
     docker::check_dockerfile_target(root, &target)?;
     docker::build_image(root, &image, &tag, platform.map(|p| p.docker_name()))?;
     // 平台漂移警告（规格决定 #9）：与磁盘上 docker-compose.yml 的 platform 行比对，不自动回写生成物
-    if let Some(p) = platform_cli {
-        let disk_platform = std::fs::read_to_string(root.join("docker-compose.yml"))
-            .ok()
-            .and_then(|t| docker::compose_platform(&t));
-        if let Some(disk_p) = disk_platform {
-            if p != disk_p.as_str() {
-                println!("警告：--platform {p} 与 docker-compose.yml 的 platform（{disk_p}）不一致。");
-                println!("请运行 zpm docker init --platform {p} --force 重新生成 compose。");
-            }
+    if let Some(p) = platform {
+        if let Some(w) = docker::platform_drift_warning(root, p) {
+            println!("警告：{w}");
         }
     }
     println!("镜像已构建：{image}:{tag}");
@@ -140,9 +120,7 @@ fn up(root: &Path, cfg: &ProjectConfig) -> Result<(), ZpmError> {
     }
     docker::compose_up(root)?;
     // 访问地址端口以磁盘上的 compose 为准（规格决定 #10）
-    let port = std::fs::read_to_string(root.join("docker-compose.yml"))
-        .ok()
-        .and_then(|t| docker::compose_port(&t))
+    let port = docker::compose_host_port_from_disk(root)
         .map(|p| p.to_string())
         .unwrap_or_else(|| "<未知>".into());
     println!("已启动：http://localhost:{port}");

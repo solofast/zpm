@@ -61,23 +61,29 @@ pub fn effective_rust_target(cfg: &DockerCfg, platform: Platform) -> String {
     cfg.rust_target.clone().unwrap_or_else(|| platform.rust_target().to_string())
 }
 
-/// 镜像名安全化：取 name 末段（路径名 → 目录名），小写化，非 [a-z0-9_.-] → '-'，
-/// 去掉开头/结尾的非字母数字段（docker 镜像名组件须以字母数字结尾）；空则回落 zpm-app。
+/// 镜像名安全化：取 name 末段（路径名 → 目录名），小写化，非字母数字一律归一为 '-'，
+/// 折叠分隔符连跑为单个 '-'（docker 镜像名不允许相邻分隔段：a..b、a._b、a.-b 均非法），
+/// 去掉首尾分隔符；空则回落 zpm-app。输出必然是合法 docker 镜像名。
 pub fn sanitize_image_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let mapped: String = base
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect();
-    let trimmed = mapped
-        .trim_start_matches(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit()))
-        .trim_end_matches(['-', '.', '_']);
+    let mut collapsed = String::with_capacity(mapped.len());
+    let mut prev_sep = false;
+    for c in mapped.chars() {
+        if c == '-' {
+            if !prev_sep {
+                collapsed.push('-');
+            }
+            prev_sep = true;
+        } else {
+            collapsed.push(c);
+            prev_sep = false;
+        }
+    }
+    let trimmed = collapsed.trim_matches('-');
     if trimmed.is_empty() { "zpm-app".to_string() } else { trimmed.to_string() }
 }
 
@@ -215,6 +221,40 @@ pub fn compose_platform(compose_txt: &str) -> Option<String> {
     let (_, val) = line.split_once(':')?;
     let v = val.trim();
     if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// 平台解析：CLI 显式 > 配置 `docker.platform` > None（宿主原生）
+pub fn resolve_platform(
+    cli: Option<&str>,
+    cfg: &DockerCfg,
+) -> Result<Option<Platform>, ZpmError> {
+    match cli {
+        Some(s) => Ok(Some(Platform::parse(s)?)),
+        None => match &cfg.platform {
+            Some(s) => Ok(Some(Platform::parse(s)?)),
+            None => Ok(None),
+        },
+    }
+}
+
+/// build 平台漂移警告（规格决定 #9）：与磁盘上 compose 的 platform 行比对，
+/// 不一致时返回警告文案（含重新生成指引）；一致、无 platform 行或文件缺失 → None
+pub fn platform_drift_warning(root: &Path, platform: Platform) -> Option<String> {
+    let disk = std::fs::read_to_string(root.join("docker-compose.yml")).ok()?;
+    let disk_platform = compose_platform(&disk)?;
+    if disk_platform == platform.docker_name() {
+        return None;
+    }
+    Some(format!(
+        "--platform {} 与 docker-compose.yml 的 platform（{disk_platform}）不一致；请运行 zpm docker init --platform {} --force 重新生成 compose",
+        platform.docker_name(),
+        platform.docker_name()
+    ))
+}
+
+/// up 访问端口（规格决定 #10）：以磁盘上的 compose 文件为准；文件缺失或解析失败 → None
+pub fn compose_host_port_from_disk(root: &Path) -> Option<u16> {
+    compose_port(&std::fs::read_to_string(root.join("docker-compose.yml")).ok()?)
 }
 
 /// build 前预检：磁盘 Dockerfile 必须存在，且 COPY 目标与本次构建 target 一致
@@ -377,11 +417,19 @@ fn verify_sha256(root: &Path, dest: &Path, url: &str) -> Result<(), ZpmError> {
         .arg(dest)
         .output()
         .or_else(|_| Command::new("shasum").args(["-a", "256"]).arg(dest).output())?;
+    if !local.status.success() {
+        eprintln!("提示：本地摘要命令执行失败（跳过校验）");
+        return Ok(());
+    }
     let actual = String::from_utf8_lossy(&local.stdout)
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_string();
+    if actual.is_empty() {
+        eprintln!("提示：无法计算本地摘要（跳过校验）");
+        return Ok(());
+    }
     if actual != expected {
         return Err(ZpmError::TransportError(format!(
             "release 二进制校验失败：期望 {expected}，实际 {actual}"
@@ -449,21 +497,28 @@ pub fn build_image(
     run_prog("docker", &docker_build_args(image, tag, platform), root)
 }
 
-/// docker compose up -d（在项目根执行；先探测 compose 插件）
-pub fn compose_up(root: &Path) -> Result<(), ZpmError> {
-    ensure_available("docker")?;
+/// 探测 docker compose 插件（up/down 都依赖）
+fn ensure_compose_plugin() -> Result<(), ZpmError> {
     let probe = Command::new("docker").args(["compose", "version"]).output()?;
     if !probe.status.success() {
         return Err(ZpmError::NotFound(
             "docker compose 插件不可用：请升级 Docker Desktop 或安装 docker-compose-plugin".into(),
         ));
     }
+    Ok(())
+}
+
+/// docker compose up -d（在项目根执行；先探测 compose 插件）
+pub fn compose_up(root: &Path) -> Result<(), ZpmError> {
+    ensure_available("docker")?;
+    ensure_compose_plugin()?;
     run_prog("docker", &compose_args("up"), root)
 }
 
-/// docker compose down（在项目根执行；与 up/build 一致先探测可用性）
+/// docker compose down（在项目根执行；与 up 一致探测可用性与 compose 插件）
 pub fn compose_down(root: &Path) -> Result<(), ZpmError> {
     ensure_available("docker")?;
+    ensure_compose_plugin()?;
     run_prog("docker", &compose_args("down"), root)
 }
 
@@ -787,5 +842,58 @@ sync: { tables: [] }
         let err = run_prog(bad.to_str().unwrap(), &args, dir.path()).unwrap_err();
         assert!(err.to_string().contains("boom"), "实际：{err}");
         assert!(err.to_string().contains("build"), "错误应含子命令：{err}");
+    }
+
+    #[test]
+    fn sanitize_collapses_separator_runs() {
+        assert_eq!(sanitize_image_name("app..data"), "app-data");
+        assert_eq!(sanitize_image_name("app._x"), "app-x");
+        assert_eq!(sanitize_image_name("a-._-b"), "a-b");
+        assert_eq!(sanitize_image_name("my.app"), "my-app");
+    }
+
+    #[test]
+    fn resolve_platform_prefers_cli_then_config() {
+        let mut cfg = DockerCfg::default();
+        cfg.platform = Some("linux/arm64".into());
+        assert_eq!(
+            resolve_platform(Some("linux/amd64"), &cfg).unwrap(),
+            Some(Platform::Amd64)
+        );
+        assert_eq!(resolve_platform(None, &cfg).unwrap(), Some(Platform::Arm64));
+        cfg.platform = None;
+        assert_eq!(resolve_platform(None, &cfg).unwrap(), None);
+    }
+
+    #[test]
+    fn platform_drift_warning_compares_disk_compose() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("docker-compose.yml"),
+            "services:\n  zpm:\n    platform: linux/arm64\n",
+        )
+        .unwrap();
+        // 与磁盘一致 → 无警告
+        assert_eq!(platform_drift_warning(dir.path(), Platform::Arm64), None);
+        // 不一致 → 警告含「不一致」与重新生成指引
+        let w = platform_drift_warning(dir.path(), Platform::Amd64).unwrap();
+        assert!(w.contains("不一致"), "实际：{w}");
+        assert!(w.contains("init --platform"), "实际：{w}");
+        // compose 缺失 → None（无 platform 行可比）
+        std::fs::remove_file(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(platform_drift_warning(dir.path(), Platform::Amd64), None);
+    }
+
+    #[test]
+    fn compose_host_port_from_disk_reads_disk_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("docker-compose.yml"),
+            "services:\n  zpm:\n    ports: [\"4310:4310\"]\n",
+        )
+        .unwrap();
+        assert_eq!(compose_host_port_from_disk(dir.path()), Some(4310));
+        std::fs::remove_file(dir.path().join("docker-compose.yml")).unwrap();
+        assert_eq!(compose_host_port_from_disk(dir.path()), None);
     }
 }

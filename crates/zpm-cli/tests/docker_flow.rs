@@ -1,5 +1,7 @@
 //! `zpm docker` 集成测试：init 生成/拒绝覆盖/force；build/up/down 经假 docker 记录 argv。
 //! 假 docker 是真实可执行脚本（shell-out 边界的真实行为），不做 mock。
+// 假 docker 依赖 /bin/sh 脚本与 unix 权限位：非 unix 平台整文件跳过编译
+#![cfg(unix)]
 use assert_cmd::Command;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
