@@ -222,14 +222,11 @@ pub struct DockerCfg {
     /// GitHub Release 下载地址前缀（镜像加速），空 = 直连
     #[serde(default)]
     pub release_mirror: Option<String>,
-    /// 覆盖 platform → rust target 映射（极少用）
-    #[serde(default)]
-    pub rust_target: Option<String>,
 }
 
 impl Default for DockerCfg {
     fn default() -> Self {
-        Self { platform: None, image: None, tag: None, release_mirror: None, rust_target: None }
+        Self { platform: None, image: None, tag: None, release_mirror: None }
     }
 }
 
@@ -708,7 +705,6 @@ sync: { tables: [] }
         assert_eq!(cfg.docker.image.as_deref(), Some("my-crm"));
         assert_eq!(cfg.docker.tag.as_deref(), Some("v1"));
         assert_eq!(cfg.docker.release_mirror.as_deref(), Some("https://gh-proxy.com/"));
-        assert_eq!(cfg.docker.rust_target, None);
 
         // 节缺失 → 全 None
         let cfg = load_str(MINIMAL).unwrap();

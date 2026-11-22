@@ -47,6 +47,10 @@ pub enum DockerCommands {
 pub fn run(args: DockerArgs) -> Result<(), ZpmError> {
     let cwd = std::env::current_dir()?;
     let root = project_config::find_project_root(&cwd)?;
+    // down 不依赖项目配置：配置文件损坏时也应能停容器
+    if let DockerCommands::Down = args.command {
+        return down(&root);
+    }
     let cfg =
         project_config::load_project_config(&root.join(project_config::PROJECT_FILE))?;
     match args.command {
@@ -57,7 +61,7 @@ pub fn run(args: DockerArgs) -> Result<(), ZpmError> {
             build(&root, &cfg, platform.as_deref(), tag.as_deref(), binary.as_deref(), force)
         }
         DockerCommands::Up => up(&root, &cfg),
-        DockerCommands::Down => down(&root),
+        DockerCommands::Down => Ok(()), // 上方 if 已处理，此处仅为穷尽性
     }
 }
 
@@ -92,10 +96,7 @@ fn build(
     let image = docker::effective_image(cfg);
     let tag =
         tag_cli.map(str::to_string).unwrap_or_else(|| docker::effective_tag(&cfg.docker));
-    let target = docker::effective_rust_target(
-        &cfg.docker,
-        platform.unwrap_or_else(docker::Platform::host_native),
-    );
+    let target = platform.unwrap_or_else(docker::Platform::host_native).rust_target().to_string();
     match binary {
         Some(p) => docker::stage_binary(root, p, &target)?,
         None => docker::download_release_binary(root, &cfg.docker, &target, force)?,
@@ -115,6 +116,12 @@ fn build(
 }
 
 fn up(root: &Path, cfg: &ProjectConfig) -> Result<(), ZpmError> {
+    // compose 缺失时中文早退，而不是等 docker compose up 裸报错
+    if !root.join("docker-compose.yml").is_file() {
+        return Err(ZpmError::NotFound(
+            "未找到 docker-compose.yml（先运行 zpm docker init）".into(),
+        ));
+    }
     for w in docker::drift_warnings(root, cfg) {
         println!("警告：{w}");
     }

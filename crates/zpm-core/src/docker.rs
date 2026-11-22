@@ -56,9 +56,9 @@ impl Platform {
     }
 }
 
-/// 生效 rust target：cfg.rust_target 覆盖 > platform 映射
-pub fn effective_rust_target(cfg: &DockerCfg, platform: Platform) -> String {
-    cfg.rust_target.clone().unwrap_or_else(|| platform.rust_target().to_string())
+/// 生效 rust target：由 platform 直接映射
+pub fn effective_rust_target(platform: Platform) -> String {
+    platform.rust_target().to_string()
 }
 
 /// 镜像名安全化：取 name 末段（路径名 → 目录名），小写化，非字母数字一律归一为 '-'，
@@ -150,10 +150,7 @@ fn render_ctx(cfg: &crate::project_config::ProjectConfig, platform: Option<Platf
         image: effective_image(cfg),
         tag: effective_tag(&cfg.docker),
         port: cfg.server.port,
-        rust_target: effective_rust_target(
-            &cfg.docker,
-            platform.unwrap_or_else(Platform::host_native),
-        ),
+        rust_target: platform.unwrap_or_else(Platform::host_native).rust_target().to_string(),
         compose_platform: platform
             .map(|p| p.docker_name().to_string())
             .or_else(|| cfg.docker.platform.clone()),
@@ -501,9 +498,10 @@ pub fn build_image(
 fn ensure_compose_plugin() -> Result<(), ZpmError> {
     let probe = Command::new("docker").args(["compose", "version"]).output()?;
     if !probe.status.success() {
-        return Err(ZpmError::NotFound(
-            "docker compose 插件不可用：请升级 Docker Desktop 或安装 docker-compose-plugin".into(),
-        ));
+        return Err(ZpmError::NotFound(format!(
+            "docker compose 插件不可用：{}（请升级 Docker Desktop 或安装 docker-compose-plugin）",
+            String::from_utf8_lossy(&probe.stderr).trim()
+        )));
     }
     Ok(())
 }
@@ -609,20 +607,6 @@ sync: { tables: [] }
         // 尾斜杠去重
         cfg.release_mirror = Some("https://gh-proxy.com".into());
         assert!(release_url(&cfg, "t").starts_with("https://gh-proxy.com/https://"));
-    }
-
-    #[test]
-    fn effective_rust_target_override() {
-        let mut cfg = DockerCfg::default();
-        assert_eq!(
-            effective_rust_target(&cfg, Platform::Arm64),
-            "aarch64-unknown-linux-musl"
-        );
-        cfg.rust_target = Some("x86_64-unknown-linux-musl".into());
-        assert_eq!(
-            effective_rust_target(&cfg, Platform::Arm64),
-            "x86_64-unknown-linux-musl"
-        );
     }
 
     #[test]
