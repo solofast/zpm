@@ -206,6 +206,30 @@ impl Default for WriteCfg {
     }
 }
 
+/// [docker] 节（全部可选）：`zpm docker` 容器化交付配置。缺省字段全 None
+/// （platform = 宿主原生、image = name 末段安全化、tag = latest、直连下载）。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct DockerCfg {
+    /// build/init 默认平台（linux/amd64 | linux/arm64）
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// 镜像名；缺省取 name 末段安全化
+    #[serde(default)]
+    pub image: Option<String>,
+    /// 镜像 tag；缺省 latest
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// GitHub Release 下载地址前缀（镜像加速），空 = 直连
+    #[serde(default)]
+    pub release_mirror: Option<String>,
+}
+
+impl Default for DockerCfg {
+    fn default() -> Self {
+        Self { platform: None, image: None, tag: None, release_mirror: None }
+    }
+}
+
 /// [features] 节：页面功能开关（工作台 / 数据字典 / 主题配置）。缺省（整个节、整个文件或
 /// 单个字段缺失）一律 true——fail-open，仅在显式 false 时关闭对应页面与菜单入口。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -242,6 +266,9 @@ pub struct ProjectConfig {
     /// 节级缺省：无 features 字段时 serde 用 FeaturesCfg::default()（三 true）
     #[serde(default)]
     pub features: FeaturesCfg,
+    /// [docker] 节：容器化交付（未知字段本就静默忽略，旧配置完全兼容）
+    #[serde(default)]
+    pub docker: DockerCfg,
 }
 
 /// 加载并校验 zpm.config.yaml
@@ -330,6 +357,13 @@ fn validate_semantics(cfg: &ProjectConfig) -> Result<(), ZpmError> {
         if !is_safe_ident(&t.primary_key) {
             return Err(ZpmError::Format(format!(
                 "invalid identifier: sync.tables[].primary_key = {t:?}（须匹配 {IDENT_RE}）"
+            )));
+        }
+    }
+    if let Some(p) = &cfg.docker.platform {
+        if p != "linux/amd64" && p != "linux/arm64" {
+            return Err(ZpmError::Format(format!(
+                "docker.platform 不支持：{p:?}（期望 linux/amd64|linux/arm64）"
             )));
         }
     }
@@ -652,6 +686,42 @@ sync: { tables: [] }
         assert!(!cfg.features.db_info);
         assert!(cfg.features.workbench);
         assert!(cfg.features.theme_studio);
+    }
+
+    /// ⑪ docker 节：字段解析、节缺失默认 None、platform 白名单校验
+    #[test]
+    fn docker_section_parses_and_validates() {
+        let cfg = load_str(
+            r#"
+name: demo
+docker: { platform: "linux/arm64", image: my-crm, tag: v1, release_mirror: "https://gh-proxy.com/" }
+datasource: { type: sqlite, file: a.db }
+target: { type: sqlite, file: b.db }
+sync: { tables: [] }
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.docker.platform.as_deref(), Some("linux/arm64"));
+        assert_eq!(cfg.docker.image.as_deref(), Some("my-crm"));
+        assert_eq!(cfg.docker.tag.as_deref(), Some("v1"));
+        assert_eq!(cfg.docker.release_mirror.as_deref(), Some("https://gh-proxy.com/"));
+
+        // 节缺失 → 全 None
+        let cfg = load_str(MINIMAL).unwrap();
+        assert_eq!(cfg.docker, DockerCfg::default());
+
+        // platform 白名单外报错（含字段路径）
+        let err = load_str(
+            r#"
+name: demo
+docker: { platform: "linux/riscv" }
+datasource: { type: sqlite, file: a.db }
+target: { type: sqlite, file: b.db }
+sync: { tables: [] }
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("docker.platform"), "实际错误：{err}");
     }
 
     /// PgConn::conn_str：带密码 / 无密码（不带冒号段）
