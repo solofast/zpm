@@ -97,19 +97,18 @@ fn build(
     let cfg_tag = docker::effective_tag(&cfg.docker);
     let tag = tag_cli.map(str::to_string).unwrap_or_else(|| cfg_tag.clone());
     let target = platform.unwrap_or_else(docker::Platform::host_native).rust_target().to_string();
+    // build 前预检先快速失败：避免白下载/白落位后才发现 Dockerfile 平台不匹配
+    docker::check_dockerfile_target(root, &target)?;
+    docker::validate_tag(&tag)?;
     // tag 漂移提醒：--tag 构建的镜像 tag 与 compose 渲染的不一致时，up 用的是 compose 的 tag，
     // compose 的 build: . 可能拿本次落位归档重建出 tag/架构混淆的镜像
-    if tag_cli.is_some() && tag != cfg_tag {
-        println!(
-            "警告：--tag {tag} 与 docker-compose.yml 的镜像 tag（{cfg_tag}）不一致；up 将使用 compose 中的 tag，请保持一致或更新 docker.tag。"
-        );
+    if let Some(w) = docker::tag_drift_warning(&tag, &cfg_tag) {
+        println!("警告：{w}");
     }
     match binary {
         Some(p) => docker::stage_binary(root, p, &target)?,
         None => docker::download_release_binary(root, &cfg.docker, &target, force)?,
     };
-    // build 前预检：Dockerfile 的 COPY 目标须与本次 target 一致，否则 docker 只会裸报 COPY 失败
-    docker::check_dockerfile_target(root, &target)?;
     docker::build_image(root, &image, &tag, platform.map(|p| p.docker_name()))?;
     // 平台漂移警告（规格决定 #9）：与磁盘上 docker-compose.yml 的 platform 行比对，不自动回写生成物
     if let Some(p) = platform {

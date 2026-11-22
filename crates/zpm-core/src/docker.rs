@@ -29,7 +29,7 @@ impl Platform {
             "linux/amd64" => Ok(Self::Amd64),
             "linux/arm64" => Ok(Self::Arm64),
             other => Err(ZpmError::Format(format!(
-                "docker.platform 不支持：{other:?}（期望 linux/amd64|linux/arm64）"
+                "platform 不支持：{other:?}（期望 linux/amd64|linux/arm64）"
             ))),
         }
     }
@@ -94,6 +94,31 @@ pub fn effective_image_of(name: &str, cfg: &DockerCfg) -> String {
 /// 生效 tag：cfg.tag > latest
 pub fn effective_tag(cfg: &DockerCfg) -> String {
     cfg.tag.clone().unwrap_or_else(|| "latest".to_string())
+}
+
+/// docker tag 规则校验：`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`，不以 `.` 或 `-` 开头
+pub fn validate_tag(tag: &str) -> Result<(), ZpmError> {
+    let valid = !tag.is_empty()
+        && tag.len() <= 128
+        && !tag.starts_with(['.', '-'])
+        && tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if valid {
+        Ok(())
+    } else {
+        Err(ZpmError::Format(format!(
+            "镜像 tag 不合法：{tag:?}（须匹配 [a-zA-Z0-9_][a-zA-Z0-9._-]{{0,127}}）"
+        )))
+    }
+}
+
+/// build tag 漂移提醒：CLI --tag 与配置渲染的 tag 不一致时返回提示文案
+/// （up 使用的是 compose 渲染的 tag，不一致会造成构建产物与部署引用错位）
+pub fn tag_drift_warning(cli_tag: &str, cfg_tag: &str) -> Option<String> {
+    (cli_tag != cfg_tag).then(|| {
+        format!(
+            "--tag {cli_tag} 与 docker-compose.yml 的镜像 tag（{cfg_tag}）不一致；up 将使用 compose 中的 tag，请保持一致或更新 docker.tag。"
+        )
+    })
 }
 
 /// Release 资产 URL；release_mirror 有值时拼前缀（尾斜杠去重）
@@ -199,7 +224,8 @@ pub fn generate_files(
     Ok(())
 }
 
-/// 从生成的 compose 文本解析宿主端口（flow 风格 `ports: ["P:P"]` → P）
+/// 从生成的 compose 文本解析宿主端口（仅识别生成模板的 flow 风格 `ports: ["P:P"]`；
+/// 用户手改 block 风格时解析返回 None，up 端口显示退化为 <未知>——已知限制）
 pub fn compose_port(compose_txt: &str) -> Option<u16> {
     let line = compose_txt.lines().find(|l| l.trim_start().starts_with("ports:"))?;
     let inner = line.split('"').nth(1)?;
@@ -207,7 +233,7 @@ pub fn compose_port(compose_txt: &str) -> Option<u16> {
     host.trim().parse().ok()
 }
 
-/// 从 compose 文本解析 platform 行（`platform: linux/arm64` → 值）；无该行 → None
+/// 从 compose 文本解析 platform 行（仅识别生成模板的行内 `platform: <值>`；无该行 → None）
 pub fn compose_platform(compose_txt: &str) -> Option<String> {
     let line = compose_txt.lines().find(|l| l.trim_start().starts_with("platform:"))?;
     let (_, val) = line.split_once(':')?;
@@ -366,9 +392,11 @@ pub fn download_release_binary(
         return Ok(dest);
     }
     let url = release_url(cfg, target);
+    // 先落临时文件、成功后原子改名：失败时不清掉既有可用归档
+    let part = root.join(".zpm-docker-download.part");
     let out = Command::new("curl")
         .args(["-fSL", "--retry", "2", "-o"])
-        .arg(&dest)
+        .arg(&part)
         .arg("--")
         .arg(&url)
         .output()
@@ -378,16 +406,17 @@ pub fn download_release_binary(
             )
         })?;
     if !out.status.success() {
-        let _ = std::fs::remove_file(&dest);
+        let _ = std::fs::remove_file(&part);
         return Err(ZpmError::TransportError(format!(
             "下载 release 二进制失败：{url}\n{}（提示：国内网络可配置 zpm.config.yaml 的 docker.release_mirror，或改用 --binary）",
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
-    if let Err(e) = verify_sha256(root, &dest, &url) {
-        let _ = std::fs::remove_file(&dest);
+    if let Err(e) = verify_sha256(root, &part, &url) {
+        let _ = std::fs::remove_file(&part);
         return Err(e);
     }
+    std::fs::rename(&part, &dest)?;
     Ok(dest)
 }
 
@@ -568,7 +597,7 @@ sync: { tables: [] }
         assert_eq!(p.docker_name(), "linux/amd64");
         assert_eq!(p.rust_target(), "x86_64-unknown-linux-musl");
         let err = Platform::parse("linux/riscv").unwrap_err();
-        assert!(err.to_string().contains("docker.platform"), "实际错误：{err}");
+        assert!(err.to_string().contains("linux/amd64|linux/arm64"), "实际错误：{err}");
     }
 
     #[test]
@@ -848,6 +877,24 @@ sync: { tables: [] }
         assert_eq!(sanitize_image_name("app._x"), "app-x");
         assert_eq!(sanitize_image_name("a-._-b"), "a-b");
         assert_eq!(sanitize_image_name("my.app"), "my-app");
+    }
+
+    #[test]
+    fn validate_tag_rules() {
+        assert!(validate_tag("latest").is_ok());
+        assert!(validate_tag("v1.2_beta-3").is_ok());
+        assert!(validate_tag(".x").is_err());
+        assert!(validate_tag("-x").is_err());
+        assert!(validate_tag("").is_err());
+        assert!(validate_tag("a b").is_err());
+    }
+
+    #[test]
+    fn tag_drift_warning_fires_only_on_mismatch() {
+        let w = tag_drift_warning("t2", "t1").unwrap();
+        assert!(w.contains("--tag t2"), "实际：{w}");
+        assert!(w.contains("（t1）"), "实际：{w}");
+        assert_eq!(tag_drift_warning("t1", "t1"), None);
     }
 
     #[test]
