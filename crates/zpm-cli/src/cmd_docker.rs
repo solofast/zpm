@@ -94,9 +94,16 @@ fn build(
     docker::ensure_available("docker")?;
     let platform = docker::resolve_platform(platform_cli, &cfg.docker)?;
     let image = docker::effective_image(cfg);
-    let tag =
-        tag_cli.map(str::to_string).unwrap_or_else(|| docker::effective_tag(&cfg.docker));
+    let cfg_tag = docker::effective_tag(&cfg.docker);
+    let tag = tag_cli.map(str::to_string).unwrap_or_else(|| cfg_tag.clone());
     let target = platform.unwrap_or_else(docker::Platform::host_native).rust_target().to_string();
+    // tag 漂移提醒：--tag 构建的镜像 tag 与 compose 渲染的不一致时，up 用的是 compose 的 tag，
+    // compose 的 build: . 可能拿本次落位归档重建出 tag/架构混淆的镜像
+    if tag_cli.is_some() && tag != cfg_tag {
+        println!(
+            "警告：--tag {tag} 与 docker-compose.yml 的镜像 tag（{cfg_tag}）不一致；up 将使用 compose 中的 tag，请保持一致或更新 docker.tag。"
+        );
+    }
     match binary {
         Some(p) => docker::stage_binary(root, p, &target)?,
         None => docker::download_release_binary(root, &cfg.docker, &target, force)?,

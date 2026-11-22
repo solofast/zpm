@@ -56,11 +56,6 @@ impl Platform {
     }
 }
 
-/// 生效 rust target：由 platform 直接映射
-pub fn effective_rust_target(platform: Platform) -> String {
-    platform.rust_target().to_string()
-}
-
 /// 镜像名安全化：取 name 末段（路径名 → 目录名），小写化，非字母数字一律归一为 '-'，
 /// 折叠分隔符连跑为单个 '-'（docker 镜像名不允许相邻分隔段：a..b、a._b、a.-b 均非法），
 /// 去掉首尾分隔符；空则回落 zpm-app。输出必然是合法 docker 镜像名。
@@ -260,18 +255,35 @@ pub fn check_dockerfile_target(root: &Path, target: &str) -> Result<(), ZpmError
     let txt = std::fs::read_to_string(root.join("Dockerfile")).map_err(|_| {
         ZpmError::NotFound("未找到 Dockerfile（先运行 zpm docker init）".to_string())
     })?;
-    let copy_line = format!("COPY zpm-{target}.tar.gz");
-    if txt.lines().any(|l| l.contains(&copy_line)) {
-        return Ok(());
-    }
-    let platform = match target {
+    let this_platform = match target {
         "aarch64-unknown-linux-musl" => "linux/arm64",
         "x86_64-unknown-linux-musl" => "linux/amd64",
-        _ => "<platform>",
+        _ => target,
     };
-    Err(ZpmError::Format(format!(
-        "Dockerfile 的 COPY 目标与本次构建 target（{target}）不一致；请运行 zpm docker init --platform {platform} --force 重新生成 Dockerfile"
-    )))
+    // 从 COPY 行反推磁盘 Dockerfile 的目标平台，给出双向可执行的修复指引
+    // （避免单向指引误导：init arm64 + build 缺省 amd64 时，正解是补 build --platform 而非重建）
+    // COPY 行格式与生成模板一致：COPY zpm-<target>.tar.gz /tmp/zpm.tar.gz
+    let disk_platform = txt.lines().find_map(|l| {
+        let t = l.trim_start();
+        if !t.starts_with("COPY zpm-") {
+            return None;
+        }
+        let target_name = t.strip_prefix("COPY zpm-")?.split_once(".tar.gz")?.0;
+        Some(match target_name {
+            "aarch64-unknown-linux-musl" => "linux/arm64",
+            "x86_64-unknown-linux-musl" => "linux/amd64",
+            other => other,
+        })
+    });
+    match disk_platform {
+        Some(disk) if disk != this_platform => Err(ZpmError::Format(format!(
+            "Dockerfile 平台（{disk}）与本次构建产物（{target}）不一致；请在 build 加 --platform {disk} 与其匹配，或运行 zpm docker init --platform {this_platform} --force 重新生成"
+        ))),
+        Some(_) => Ok(()),
+        None => Err(ZpmError::Format(format!(
+            "Dockerfile 未找到 COPY zpm-{target}.tar.gz；请运行 zpm docker init --force 重新生成"
+        ))),
+    }
 }
 
 /// 漂移检查：按当前配置重渲染 compose，提取 `ports:`/`image:`/`platform:`
@@ -357,6 +369,7 @@ pub fn download_release_binary(
     let out = Command::new("curl")
         .args(["-fSL", "--retry", "2", "-o"])
         .arg(&dest)
+        .arg("--")
         .arg(&url)
         .output()
         .map_err(|_| {
@@ -384,6 +397,7 @@ fn verify_sha256(root: &Path, dest: &Path, url: &str) -> Result<(), ZpmError> {
     let fetched = Command::new("curl")
         .args(["-fSL", "--retry", "1", "-o"])
         .arg(&sum_file)
+        .arg("--")
         .arg(format!("{url}.sha256"))
         .output();
     let expected = match fetched {

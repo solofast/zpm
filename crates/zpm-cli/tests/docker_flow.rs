@@ -199,3 +199,23 @@ fn build_warns_when_cli_platform_differs_from_disk_compose() {
     assert!(stdout.contains("docker-compose.yml 的 platform（linux/arm64）"), "实际：{stdout}");
     assert!(stdout.contains("zpm docker init --platform linux/amd64 --force"), "实际：{stdout}");
 }
+
+#[test]
+fn build_warns_when_cli_tag_differs_from_config() {
+    let proj = TempDir::new().unwrap();
+    fixture(proj.path());
+    let (bin, _log) = fake_docker();
+    let fake_bin = proj.path().join("fake-zpm-bin");
+    fs::write(&fake_bin, b"fake-elf").unwrap();
+    zpm().current_dir(proj.path()).args(["docker", "init"]).assert().success();
+    let out = cmd_with_fake(&bin)
+        .current_dir(proj.path())
+        .args(["docker", "build", "--tag", "t2", "--binary"])
+        .arg(&fake_bin)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(stdout.contains("警告"), "实际：{stdout}");
+    assert!(stdout.contains("--tag t2"), "实际：{stdout}");
+    assert!(stdout.contains("镜像 tag（t1）"), "实际：{stdout}");
+}
